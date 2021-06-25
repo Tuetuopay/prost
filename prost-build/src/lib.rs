@@ -117,7 +117,7 @@ mod lib_generator;
 mod message_graph;
 mod path;
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::default;
 use std::env;
 use std::ffi::{OsStr, OsString};
@@ -228,7 +228,8 @@ const DISABLE_COMMENTS: &str = "disable_comments";
 const EXTERN_PATH: &str = "extern_path";
 const RETAIN_ENUM_PREFIX: &str = "retain_enum_prefix";
 const MOD_RS: &str = "mod_rs";
-pub const PROTOC_OPTS: [&str; 9] = [
+const GEN_CRATE: &str = "gen_crate";
+pub const PROTOC_OPTS: [&str; 10] = [
     BTREE_MAP,
     BYTES,
     FIELD_ATTR,
@@ -238,6 +239,7 @@ pub const PROTOC_OPTS: [&str; 9] = [
     EXTERN_PATH,
     RETAIN_ENUM_PREFIX,
     MOD_RS,
+    GEN_CRATE,
 ];
 
 /// Configuration options for Protobuf code generation.
@@ -257,6 +259,7 @@ pub struct Config {
     protoc_args: Vec<OsString>,
     disable_comments: PathMap<()>,
     mod_rs: bool,
+    manifest_tpl: Option<PathBuf>,
 }
 
 impl Config {
@@ -294,6 +297,7 @@ impl Config {
                 [EXTERN_PATH, k, v] => self.extern_paths.push((k.to_string(), v.to_string())),
                 [RETAIN_ENUM_PREFIX] => self.strip_enum_prefix = false,
                 [MOD_RS] => self.mod_rs = true,
+                [GEN_CRATE, v] => self.manifest_tpl = Some(v.into()),
                 _ if log_unknown => eprintln!("prost: Unknown option `{}`", opt.join("=")),
                 _ => (),
             }
@@ -747,6 +751,20 @@ impl Config {
         self
     }
 
+    /// Generate a full crate based on a `Cargo.toml` template.
+    ///
+    /// The output directory will contain the crate and not the built files directly, in `gen/`
+    /// folder. Each `proto` package will get its own feature flag, with proper dependency solving.
+    /// The `Cargo.toml` must contain `{{ features }}` string where all crate features will be
+    /// inserted.
+    pub fn generate_crate<P>(&mut self, manifest_template: P) -> &mut Self
+    where
+        P: Into<PathBuf>,
+    {
+        self.manifest_tpl = Some(manifest_template.into());
+        self
+    }
+
     /// Compile `.proto` files into Rust files during a Cargo build with additional code generator
     /// configuration options.
     ///
@@ -838,8 +856,7 @@ impl Config {
 
         let modules = self.generate(file_descriptor_set.file)?;
         for (module, content) in modules {
-            let mut filename = module.join(".");
-            filename.push_str(".rs");
+            let filename = self.filename(&module);
 
             let output_path = target.join(&filename);
 
@@ -865,7 +882,7 @@ impl Config {
         match self.generate(req.proto_file) {
             Ok(modules) => {
                 let f = modules.into_iter().map(|(module, content)| File {
-                    name: Some(module.join(".") + ".rs"),
+                    name: Some(self.filename(&module)),
                     insertion_point: None,
                     content: Some(content),
                     generated_code_info: None,
@@ -884,9 +901,24 @@ impl Config {
         }
     }
 
+    fn filename(&self, module: &Module) -> String {
+        let (prefix, suffix) = match (self.manifest_tpl.is_some(), module.as_slice()) {
+            (true, [n]) if n == "lib" => ("src/", ".rs"),
+            (true, [n]) if n == "Cargo.toml" => ("", ""),
+            (true, _) => ("gen/", ".rs"),
+            (false, _) => ("", ".rs"),
+        };
+        prefix.to_owned() + &module.join(".") + suffix
+    }
+
     fn generate(&mut self, files: Vec<FileDescriptorProto>) -> Result<HashMap<Module, String>> {
         let mut modules = HashMap::new();
         let mut packages = HashMap::new();
+        let deps = self
+            .manifest_tpl
+            .is_some()
+            .then(|| self.build_deps(&files))
+            .unwrap_or_default();
 
         let message_graph = MessageGraph::new(&files)
             .map_err(|error| Error::new(ErrorKind::InvalidInput, error))?;
@@ -912,13 +944,18 @@ impl Config {
             }
         }
 
-        if self.mod_rs {
+        if self.mod_rs || self.manifest_tpl.is_some() {
             let mut mods = Mod::default();
             for (module, _) in &modules {
                 mods.push(module);
             }
-            let mut buf = modules.entry(vec!["mod".to_owned()]).or_default();
+            let name = self.manifest_tpl.is_some().then(|| "lib").unwrap_or("mod");
+            let mut buf = modules.entry(vec![name.to_owned()]).or_default();
             LibGenerator::generate_librs(self, &mods, &mut buf);
+        }
+        if let Some(tpl) = self.manifest_tpl.clone() {
+            let mut buf = modules.entry(vec!["Cargo.toml".to_owned()]).or_default();
+            LibGenerator::generate_manifest(self, tpl, deps, &mut buf);
         }
 
         Ok(modules)
@@ -930,6 +967,26 @@ impl Config {
             .filter(|s| !s.is_empty())
             .map(to_snake)
             .collect()
+    }
+
+    fn build_deps(&self, files: &[FileDescriptorProto]) -> BTreeMap<String, BTreeSet<String>> {
+        let names: HashMap<_, _> = files
+            .iter()
+            .map(|file| (file.name().to_owned(), file.package().to_owned()))
+            .collect();
+        let mut deps: BTreeMap<_, BTreeSet<_>> = BTreeMap::new();
+        for file in files {
+            let names = file
+                .dependency
+                .iter()
+                .filter_map(|dep| names.get(dep))
+                .filter(|dep| *dep != file.package())
+                .map(|s| s.clone());
+            deps.entry(file.package().to_owned())
+                .or_default()
+                .extend(names);
+        }
+        deps
     }
 }
 
@@ -949,6 +1006,7 @@ impl default::Default for Config {
             protoc_args: Vec::new(),
             disable_comments: PathMap::default(),
             mod_rs: false,
+            manifest_tpl: None,
         }
     }
 }

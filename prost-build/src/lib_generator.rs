@@ -1,4 +1,6 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::fs::read_to_string;
+use std::path::PathBuf;
 
 use crate::{Config, Module};
 
@@ -64,8 +66,19 @@ impl<'a> LibGenerator<'a> {
         }
 
         for package in mods.contents.iter().map(|content| content.join(".")) {
+            if self.config.manifest_tpl.is_some() {
+                let feature = package.replace("r#", "").replace(".", "_");
+                self.push_indent();
+                self.buf.push_str("#[cfg(feature = \"");
+                self.buf.push_str(&feature);
+                self.buf.push_str("\")]\n");
+            }
+
             self.push_indent();
             self.buf.push_str("include!(\"");
+            if self.config.manifest_tpl.is_some() {
+                self.buf.push_str("../gen/");
+            }
             self.buf.push_str(&package);
             self.buf.push_str(".rs\");\n");
         }
@@ -75,5 +88,33 @@ impl<'a> LibGenerator<'a> {
         for _ in 0..self.depth {
             self.buf.push_str("    ");
         }
+    }
+
+    pub fn generate_manifest(
+        config: &'a mut Config,
+        template: PathBuf,
+        deps: BTreeMap<String, BTreeSet<String>>,
+        buf: &mut String,
+    ) {
+        let mut generator = LibGenerator {
+            config,
+            depth: 0,
+            buf,
+        };
+        generator.push_manifest(template, deps);
+    }
+
+    fn push_manifest(&mut self, template: PathBuf, deps: BTreeMap<String, BTreeSet<String>>) {
+        let template = read_to_string(template).unwrap();
+        let mut buf = String::new();
+        for (feat, deps) in deps {
+            buf.push('"');
+            buf.push_str(&feat);
+            buf.push_str("\" = [");
+            let deps: Vec<_> = deps.iter().map(|dep| format!("\"{}\"", dep)).collect();
+            buf.push_str(&deps.join(", "));
+            buf.push_str("]\n");
+        }
+        self.buf.push_str(&template.replace("{{ features }}", &buf));
     }
 }
