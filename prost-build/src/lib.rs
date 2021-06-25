@@ -113,6 +113,7 @@ mod ast;
 mod code_generator;
 mod extern_paths;
 mod ident;
+mod lib_generator;
 mod message_graph;
 mod path;
 
@@ -135,6 +136,7 @@ pub use crate::ast::{Comments, Method, Service};
 use crate::code_generator::CodeGenerator;
 use crate::extern_paths::ExternPaths;
 use crate::ident::to_snake;
+use crate::lib_generator::{LibGenerator, Mod};
 use crate::message_graph::MessageGraph;
 use crate::path::PathMap;
 
@@ -225,7 +227,8 @@ const COMPILE_WELL_KNOWN_TYPES: &str = "compile_well_known_types";
 const DISABLE_COMMENTS: &str = "disable_comments";
 const EXTERN_PATH: &str = "extern_path";
 const RETAIN_ENUM_PREFIX: &str = "retain_enum_prefix";
-pub const PROTOC_OPTS: [&str; 8] = [
+const MOD_RS: &str = "mod_rs";
+pub const PROTOC_OPTS: [&str; 9] = [
     BTREE_MAP,
     BYTES,
     FIELD_ATTR,
@@ -234,6 +237,7 @@ pub const PROTOC_OPTS: [&str; 8] = [
     DISABLE_COMMENTS,
     EXTERN_PATH,
     RETAIN_ENUM_PREFIX,
+    MOD_RS,
 ];
 
 /// Configuration options for Protobuf code generation.
@@ -252,6 +256,7 @@ pub struct Config {
     extern_paths: Vec<(String, String)>,
     protoc_args: Vec<OsString>,
     disable_comments: PathMap<()>,
+    mod_rs: bool,
 }
 
 impl Config {
@@ -288,6 +293,7 @@ impl Config {
                 [DISABLE_COMMENTS, v] => self.disable_comments.insert(v.to_string(), ()),
                 [EXTERN_PATH, k, v] => self.extern_paths.push((k.to_string(), v.to_string())),
                 [RETAIN_ENUM_PREFIX] => self.strip_enum_prefix = false,
+                [MOD_RS] => self.mod_rs = true,
                 _ if log_unknown => eprintln!("prost: Unknown option `{}`", opt.join("=")),
                 _ => (),
             }
@@ -735,6 +741,12 @@ impl Config {
         self
     }
 
+    /// Generate a `mod.rs` file suitable for a full module.
+    pub fn mod_rs(&mut self) -> &mut Self {
+        self.mod_rs = true;
+        self
+    }
+
     /// Compile `.proto` files into Rust files during a Cargo build with additional code generator
     /// configuration options.
     ///
@@ -900,6 +912,15 @@ impl Config {
             }
         }
 
+        if self.mod_rs {
+            let mut mods = Mod::default();
+            for (module, _) in &modules {
+                mods.push(module);
+            }
+            let mut buf = modules.entry(vec!["mod".to_owned()]).or_default();
+            LibGenerator::generate_librs(self, &mods, &mut buf);
+        }
+
         Ok(modules)
     }
 
@@ -927,6 +948,7 @@ impl default::Default for Config {
             extern_paths: Vec::new(),
             protoc_args: Vec::new(),
             disable_comments: PathMap::default(),
+            mod_rs: false,
         }
     }
 }
