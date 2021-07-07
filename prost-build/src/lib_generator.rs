@@ -49,7 +49,20 @@ impl<'a> LibGenerator<'a> {
             depth: 0,
             buf,
         };
+
+        if let Some(set) = generator.config.file_descriptor_set_path.clone() {
+            generator.push_file_descriptor_set(set);
+        }
         generator.push_mod(mods);
+    }
+
+    fn push_file_descriptor_set(&mut self, set_path: PathBuf) {
+        self.buf.push_str("include!(\"");
+        if self.config.manifest_tpl.is_some() {
+            self.buf.push_str("../gen/");
+        }
+        self.buf.push_str(set_path.to_str().unwrap());
+        self.buf.push_str(".rs\");\n");
     }
 
     fn push_mod(&mut self, mods: &Mod) {
